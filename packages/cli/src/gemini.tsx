@@ -60,6 +60,11 @@ import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  initializeGateways,
+  cleanupGateways,
+  type GatewayService,
+} from './gateways/GatewayStartupService.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -142,6 +147,7 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  gatewayService?: GatewayService,
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -159,6 +165,7 @@ export async function startInteractiveUI(
           pasteWorkaround={
             process.platform === 'win32' || nodeMajorVersion < 20
           }
+          gatewayService={gatewayService}
         >
           <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
@@ -168,6 +175,7 @@ export async function startInteractiveUI(
                 startupWarnings={startupWarnings}
                 version={version}
                 initializationResult={initializationResult}
+                gatewayService={gatewayService}
               />
             </VimModeProvider>
           </SessionStatsProvider>
@@ -419,12 +427,24 @@ export async function main() {
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
+      
+      // Initialize gateways if configured
+      const gatewayService = await initializeGateways(settings);
+      
+      // Register gateway cleanup
+      if (gatewayService) {
+        registerCleanup(async () => {
+          await cleanupGateways(gatewayService);
+        });
+      }
+      
       await startInteractiveUI(
         config,
         settings,
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        gatewayService ?? undefined,
       );
       return;
     }

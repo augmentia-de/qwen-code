@@ -1115,8 +1115,6 @@ export default {
     'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'You can switch permission mode quickly with Tab or /approval-mode.',
-  'Try /insight to generate personalized insights from your chat history.':
-    'Try /insight to generate personalized insights from your chat history.',
 
   // ============================================================================
   // Exit Screen / Stats

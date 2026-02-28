@@ -66,6 +66,8 @@ import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import type { GatewayService } from '../../gateways/GatewayStartupService.js';
+import { getGatewayLogger } from '../../gateways/GatewayLogger.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -164,6 +166,7 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
+  gatewayService?: GatewayService,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -221,6 +224,86 @@ export const useGeminiStream = (
       getPreferredEditor,
       onEditorClose,
     );
+
+  const gatewayLogger = getGatewayLogger();
+  const gatewayOutputDelayRef = useRef<NodeJS.Timeout | null>(null);
+  const gatewayOutputBufferRef = useRef<string>('');
+  const gatewayWindowEndRef = useRef<number>(0);
+
+  // Gateway-Ausgaben senden: 10s Fenster pro Nachricht, dann gesammelt senden
+  const sendToGateway = useCallback(
+    async (content: string, type: 'output' | 'error' | 'status' = 'output') => {
+      if (gatewayService) {
+        // Fehler/Status immer sofort senden
+        if (type === 'error' || type === 'status') {
+          try {
+            gatewayLogger.log(`Sende an Gateway (${type}): ${content.substring(0, 100)}...`, 'GATEWAY_OUT');
+            await gatewayService.integration.sendOutput(content, type);
+            gatewayLogger.log('Erfolgreich an Gateway gesendet', 'DEBUG');
+          } catch (error) {
+            gatewayLogger.log(`Fehler beim Senden an Gateway: ${error}`, 'ERROR');
+          }
+          return;
+        }
+
+        // Normale Outputs im 10s-Fenster sammeln
+        const now = Date.now();
+        
+        // Wenn kein Fenster aktiv ist, neues 10s-Fenster starten
+        if (gatewayWindowEndRef.current < now) {
+          gatewayWindowEndRef.current = now + 10000; // 10 Sekunden ab jetzt
+          gatewayOutputBufferRef.current = '';
+          gatewayLogger.log(`Neues 10s-Fenster gestartet (endet um ${new Date(gatewayWindowEndRef.current).toISOString()})`, 'DEBUG');
+        }
+        
+        // Content zum Buffer hinzufügen
+        gatewayOutputBufferRef.current += content;
+        gatewayLogger.log(`Content im Fenster gesammelt (Buffer: ${gatewayOutputBufferRef.current.length} Zeichen)`, 'DEBUG');
+        
+        // Timer für Fenster-Ende
+        if (gatewayOutputDelayRef.current) {
+          clearTimeout(gatewayOutputDelayRef.current);
+        }
+        
+        const timeUntilWindowEnd = gatewayWindowEndRef.current - now;
+        gatewayOutputDelayRef.current = setTimeout(async () => {
+          const bufferedContent = gatewayOutputBufferRef.current;
+          gatewayOutputBufferRef.current = '';
+          gatewayWindowEndRef.current = 0;
+          gatewayOutputDelayRef.current = null;
+          
+          if (bufferedContent.trim()) {
+            try {
+              gatewayLogger.log(`Sende gesammelten Output (${bufferedContent.length} Zeichen)`, 'GATEWAY_OUT');
+              await gatewayService.integration.sendOutput(bufferedContent, 'output');
+              gatewayLogger.log('Erfolgreich an Gateway gesendet', 'DEBUG');
+            } catch (error) {
+              gatewayLogger.log(`Fehler beim Senden an Gateway: ${error}`, 'ERROR');
+            }
+          }
+        }, timeUntilWindowEnd);
+        
+        gatewayLogger.log(`Timer gesetzt für ${timeUntilWindowEnd}ms`, 'DEBUG');
+      } else {
+        gatewayLogger.log('Kein Gateway-Service verfügbar, überspringe Senden', 'DEBUG');
+      }
+    },
+    [gatewayService, gatewayLogger],
+  );
+  
+  // Cleanup beim Unmount
+  useEffect(() => {
+    return () => {
+      if (gatewayOutputDelayRef.current) {
+        clearTimeout(gatewayOutputDelayRef.current);
+        // Restlichen Buffer sofort senden
+        if (gatewayOutputBufferRef.current.trim()) {
+          gatewayService?.integration.sendOutput(gatewayOutputBufferRef.current, 'output')
+            .catch(err => debugLogger.warn(`Failed to send remaining buffer: ${err}`));
+        }
+      }
+    };
+  }, [gatewayService]);
 
   const pendingToolCallGroupDisplay = useMemo(
     () =>
@@ -551,8 +634,16 @@ export const useGeminiStream = (
     ): string => {
       if (turnCancelledRef.current) {
         // Prevents additional output after a user initiated cancel.
+        gatewayLogger.log('Content-Event ignoriert (turn cancelled)', 'DEBUG');
         return '';
       }
+      
+      // An Gateway senden (nur neuen Content, nicht den gesamten Buffer)
+      if (eventValue && eventValue.trim()) {
+        gatewayLogger.log(`Content-Event empfangen: ${eventValue.substring(0, 100)}...`, 'CLI_OUT');
+        sendToGateway(eventValue, 'output');
+      }
+      
       let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
@@ -598,7 +689,7 @@ export const useGeminiStream = (
       }
       return newGeminiMessageBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, sendToGateway],
   );
 
   const mergeThought = useCallback(

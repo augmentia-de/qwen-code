@@ -1176,6 +1176,82 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for web search providers.',
     showInDialog: false,
   },
+
+  // Gateway configuration for external input/output (Discord, WhatsApp, Terminal)
+  gateways: {
+    type: 'object',
+    label: 'Gateways',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for external gateways (Discord, WhatsApp, Terminal) to receive commands and send output.',
+    showInDialog: false,
+    properties: {
+      discord: {
+        type: 'object',
+        label: 'Discord Gateway',
+        category: 'Gateways',
+        requiresRestart: true,
+        default: undefined as
+          | {
+              enabled: boolean;
+              token: string;
+              allowedUserId: string;
+              allowedChannelId: string;
+              pollingIntervalMs?: number;
+            }
+          | undefined,
+        description: 'Discord gateway configuration for receiving commands via Discord.',
+        showInDialog: false,
+      },
+      whatsapp: {
+        type: 'object',
+        label: 'WhatsApp Gateway',
+        category: 'Gateways',
+        requiresRestart: true,
+        default: undefined as
+          | {
+              enabled: boolean;
+              provider: 'twilio' | 'meta' | 'web-bridge';
+              token: string;
+              senderNumber: string;
+              recipientNumber?: string;
+              apiUrl?: string;
+              pollingIntervalMs?: number;
+            }
+          | undefined,
+        description: 'WhatsApp gateway configuration for receiving commands via WhatsApp.',
+        showInDialog: false,
+      },
+      terminal: {
+        type: 'object',
+        label: 'Terminal Gateway',
+        category: 'Gateways',
+        requiresRestart: true,
+        default: undefined as
+          | {
+              enabled: boolean;
+              inputPipe: string;
+              outputPipe: string;
+              useFileBased?: boolean;
+              pollingIntervalMs?: number;
+            }
+          | undefined,
+        description: 'Terminal gateway configuration for receiving commands from another terminal.',
+        showInDialog: false,
+      },
+      pollingIntervalMs: {
+        type: 'number',
+        label: 'Default Polling Interval',
+        category: 'Gateways',
+        requiresRestart: true,
+        default: 10000,
+        description: 'Default polling interval in milliseconds for gateways (default: 10000 = 10 seconds).',
+        showInDialog: false,
+      },
+    },
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;

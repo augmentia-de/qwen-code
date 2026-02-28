@@ -107,6 +107,7 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import type { GatewayService } from '../gateways/GatewayStartupService.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -128,6 +129,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  gatewayService?: GatewayService;
 }
 
 /**
@@ -143,7 +145,7 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult } = props;
+  const { settings, config, initializationResult, gatewayService } = props;
   const historyManager = useHistory();
   useMemoryMonitor(historyManager);
   const [debugMessage, setDebugMessage] = useState<string>('');
@@ -167,6 +169,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isTrustedFolder, setIsTrustedFolder] = useState<boolean | undefined>(
     config.isTrustedFolder(),
   );
+
+  // Gateway-Status loggen
+  useEffect(() => {
+    if (gatewayService) {
+      const statuses = gatewayService.manager.getAllStatuses();
+      debugLogger.debug(`Gateway-Status: ${Array.from(statuses.entries()).map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    }
+  }, [gatewayService]);
 
   const extensionManager = config.getExtensionManager();
 
@@ -651,6 +661,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    gatewayService,
   );
 
   // Track whether suggestions are visible for Tab key handling

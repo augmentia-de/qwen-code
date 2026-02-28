@@ -39,6 +39,8 @@ import {
 import { clipboardHasImage } from '../utils/clipboardUtils.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
+import type { GatewayService } from '../../gateways/GatewayStartupService.js';
+import { getGatewayLogger } from '../../gateways/GatewayLogger.js';
 
 const ESC = '\u001B';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
@@ -56,6 +58,7 @@ export interface Key {
   sequence: string;
   kittyProtocol?: boolean;
   pasteImage?: boolean;
+  source?: 'keyboard' | 'gateway'; // Herkunft der Eingabe
 }
 
 export type KeypressHandler = (key: Key) => void;
@@ -64,6 +67,7 @@ interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
   pasteWorkaround: boolean;
+  injectGatewayInput?: (content: string) => void; // Für Gateway-Eingaben
 }
 
 const KeypressContext = createContext<KeypressContextValue | undefined>(
@@ -87,18 +91,25 @@ export function KeypressProvider({
   pasteWorkaround = false,
   config,
   debugKeystrokeLogging,
+  gatewayService,
 }: {
   children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
   pasteWorkaround?: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
+  gatewayService?: GatewayService;
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
   const isDraggingRef = useRef(false);
   const dragBufferRef = useRef('');
   const draggingTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Buffer für Gateway-Eingaben
+  const gatewayInputBuffer = useRef<string>('');
+  const isProcessingGatewayInput = useRef(false);
+  const logger = getGatewayLogger();
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -113,6 +124,106 @@ export function KeypressProvider({
     },
     [subscribers],
   );
+
+  // Funktion zum Einspeisen von Gateway-Eingaben
+  const injectGatewayInput = useCallback((content: string) => {
+    logger.log(`injectGatewayInput aufgerufen: "${content.substring(0, 100)}..."`, 'DEBUG');
+    
+    if (isProcessingGatewayInput.current) {
+      // Bereits in Verarbeitung, an Buffer anhängen
+      gatewayInputBuffer.current += content + '\n';
+      logger.log(`Eingabe zum Buffer hinzugefügt, Buffer-Größe: ${gatewayInputBuffer.current.length}`, 'DEBUG');
+      return;
+    }
+
+    isProcessingGatewayInput.current = true;
+    logger.log('Starte Verarbeitung von Gateway-Eingabe', 'DEBUG');
+
+    // Gateway-Eingabe als Tastatureingaben simulieren
+    const simulateKeypresses = async () => {
+      logger.log(`Simuliere ${content.length} Keypresses`, 'DEBUG');
+      
+      for (const char of content) {
+        const key: Key = {
+          name: char.toLowerCase(),
+          ctrl: false,
+          meta: false,
+          shift: char !== char.toLowerCase() && !!char.match(/[A-Z]/),
+          paste: false,
+          sequence: char,
+          source: 'gateway',
+        };
+
+        subscribers.forEach(handler => handler(key));
+        
+        // Kleine Verzögerung für natürlicheres Tippverhalten
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
+      // Enter am Ende senden
+      const enterKey: Key = {
+        name: 'return',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\n',
+        source: 'gateway',
+      };
+
+      logger.log('Sende Enter-Key', 'DEBUG');
+      subscribers.forEach(handler => handler(enterKey));
+      logger.logCliInput('gateway', content);
+
+      isProcessingGatewayInput.current = false;
+      logger.log('Gateway-Eingabe verarbeitet', 'DEBUG');
+
+      // Weitere gepufferte Eingaben verarbeiten
+      if (gatewayInputBuffer.current) {
+        const nextInput = gatewayInputBuffer.current;
+        gatewayInputBuffer.current = '';
+        logger.log(`Verarbeite gepufferte Eingabe: ${nextInput.substring(0, 50)}...`, 'DEBUG');
+        await simulateKeypressesForInput(nextInput.trim());
+      }
+    };
+
+    const simulateKeypressesForInput = async (input: string) => {
+      logger.log(`Simuliere gepufferte Eingabe: ${input.length} Zeichen`, 'DEBUG');
+      
+      for (const char of input) {
+        const key: Key = {
+          name: char.toLowerCase(),
+          ctrl: false,
+          meta: false,
+          shift: char !== char.toLowerCase() && !!char.match(/[A-Z]/),
+          paste: false,
+          sequence: char,
+          source: 'gateway',
+        };
+
+        subscribers.forEach(handler => handler(key));
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
+      const enterKey: Key = {
+        name: 'return',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\n',
+        source: 'gateway',
+      };
+
+      subscribers.forEach(handler => handler(enterKey));
+      logger.logCliInput('gateway', input);
+    };
+
+    simulateKeypresses().catch((error) => {
+      logger.log(`Fehler bei simulateKeypresses: ${error}`, 'ERROR');
+      console.error('[KeypressContext] simulateKeypresses error:', error);
+    });
+  }, [subscribers, logger]);
 
   useEffect(() => {
     const clearDraggingTimer = () => {
@@ -753,6 +864,30 @@ export function KeypressProvider({
       stdin.on('keypress', handleKeypress);
     }
 
+    // Gateway-Service initialisieren falls vorhanden
+    if (gatewayService) {
+      logger.log('Gateway-Service gefunden, initialisiere Input-Handler', 'INFO');
+      
+      // Handler für Gateway-Eingaben registrieren
+      gatewayService.integration.onInput((content, metadata) => {
+        logger.log(`Gateway-Eingabe empfangen: ${content.substring(0, 100)}...`, 'GATEWAY_IN');
+        logger.log(`Metadata: ${JSON.stringify(metadata)}`, 'DEBUG');
+        
+        // Nur verarbeiten wenn nicht bereits in Verarbeitung
+        if (!isProcessingGatewayInput.current) {
+          injectGatewayInput(content);
+        } else {
+          logger.log('Eingabe verworfen (bereits in Verarbeitung)', 'DEBUG');
+        }
+      });
+
+      // Output-Handler für CLI-Ausgaben
+      gatewayService.integration.enableOutput();
+      logger.log('Gateway Output aktiviert', 'INFO');
+    } else {
+      logger.log('Kein Gateway-Service vorhanden', 'DEBUG');
+    }
+
     return () => {
       if (usePassthrough) {
         keypressStream.removeListener('keypress', handleKeypress);
@@ -816,11 +951,13 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    gatewayService,
+    injectGatewayInput,
   ]);
 
   return (
     <KeypressContext.Provider
-      value={{ subscribe, unsubscribe, pasteWorkaround }}
+      value={{ subscribe, unsubscribe, pasteWorkaround, injectGatewayInput }}
     >
       {children}
     </KeypressContext.Provider>
